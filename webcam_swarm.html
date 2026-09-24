@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sensor Triage: Live Allocation</title>
+<style>
+  :root{
+    --bg:#0c1210; --panel:#121a17; --panel2:#0f1815; --line:#22322c;
+    --ink:#e7efe9; --ink-dim:#8fa89b; --accent:#ff9d3d; --accent2:#3ddc97;
+    --urgent:#ff5d5d; --neutral:#ffcf5c; --calm:#5cc8ff;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="light"]):not([data-theme="dark"]){
+      --bg:#f4f7f5;--panel:#ffffff;--panel2:#eef2f0;--line:#d7e0dc;--ink:#101915;--ink-dim:#59695f;
+    }
+  }
+  :root[data-theme="dark"]{ --bg:#0c1210; --panel:#121a17; }
+  html{scroll-padding-top:env(safe-area-inset-top,0px); height:100%;}
+  *{box-sizing:border-box;}
+  body{
+    height:100%; margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.5 -apple-system,"Inter",system-ui,sans-serif;
+  }
+  header{
+    padding:16px 20px calc(14px + env(safe-area-inset-top,0px));
+    border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
+  }
+  header h1{font-size:16px; margin:0; letter-spacing:.2px; font-weight:650;}
+  header .sub{font-size:12.5px; color:var(--ink-dim);}
+  #status{margin-left:auto; font-size:12px; color:var(--ink-dim); font-family:ui-monospace,Menlo,monospace;}
+  #status b{color:var(--accent2);}
+  main{
+    display:grid; grid-template-columns: 1fr 1fr; gap:14px;
+    padding:14px 20px calc(20px + env(safe-area-inset-bottom,0px)); max-width:1200px; margin:0 auto;
+  }
+  @media (max-width:820px){ main{grid-template-columns:1fr;} }
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px;
+    min-width:0;
+  }
+  .panel h2{font-size:12px; text-transform:none; margin:0 0 10px; color:var(--ink-dim); font-weight:600;}
+  video, #frameCanvas{ width:100%; border-radius:6px; background:#000; display:block; }
+  #frameCanvas{ height:auto; image-rendering:pixelated; aspect-ratio:4/3; }
+  .row{display:flex; gap:10px; align-items:center; margin-top:10px;}
+  textarea{
+    width:100%; resize:vertical; min-height:56px; background:var(--panel2); color:var(--ink);
+    border:1px solid var(--line); border-radius:6px; padding:8px 10px; font:14px/1.4 inherit;
+  }
+  button{
+    background:var(--accent); color:#1a1000; border:none; border-radius:6px; padding:8px 14px;
+    font-weight:600; font-size:13px; cursor:pointer;
+  }
+  button.secondary{ background:transparent; color:var(--ink); border:1px solid var(--line); }
+  .bar-row{display:flex; align-items:center; gap:8px; margin:5px 0; font-size:12.5px;}
+  .bar-row .label{width:64px; color:var(--ink-dim); flex-shrink:0;}
+  .bar-track{flex:1; height:7px; background:var(--panel2); border-radius:4px; overflow:hidden;}
+  .bar-fill{height:100%; border-radius:4px;}
+  .bar-row .val{width:38px; text-align:right; font-family:ui-monospace,Menlo,monospace; color:var(--ink-dim);}
+  #priorityLine{margin-top:8px; font-size:13px; color:var(--ink-dim);}
+  #priorityLine b{color:var(--ink); font-family:ui-monospace,Menlo,monospace;}
+  canvas#swarm{width:100%; aspect-ratio:1/1; background:var(--panel2); border-radius:6px; display:block;}
+  #stats{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-top:10px; font-size:12.5px;}
+  #stats div{background:var(--panel2); border-radius:6px; padding:8px 10px;}
+  #stats .n{font-family:ui-monospace,Menlo,monospace; font-size:16px; display:block; margin-top:2px;}
+  #log{max-height:230px; overflow-y:auto; font-size:12.5px; margin-top:4px;}
+  .logrow{display:flex; gap:8px; padding:7px 0; border-top:1px solid var(--line); align-items:center;}
+  .logrow:first-child{border-top:none;}
+  .logrow img{width:34px; height:26px; object-fit:cover; border-radius:3px; flex-shrink:0;}
+  .logrow .txt{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-dim);}
+  .tag{font-size:10.5px; padding:2px 6px; border-radius:20px; font-weight:600; flex-shrink:0;}
+  .tag.urgent{background:rgba(255,93,93,.18); color:var(--urgent);}
+  .tag.neutral{background:rgba(255,207,92,.18); color:var(--neutral);}
+  .tag.calm{background:rgba(92,200,255,.18); color:var(--calm);}
+  .tag.done{background:rgba(61,220,151,.18); color:var(--accent2);}
+  .full{grid-column:1/-1;}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2/dist/coco-ssd.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>Sensor Triage</h1>
+  <div class="sub">screen + text &rarr; priority &rarr; decentralized response</div>
+  <div id="status">screen: <b id="camStatus">auto-running (synthetic)</b></div>
+</header>
+
+<main>
+
+  <div class="panel">
+    <h2>Input: what it's looking at (your screen)</h2>
+    <video id="video" autoplay muted playsinline></video>
+    <div class="row">
+      <button id="shareBtn">Share screen</button>
+      <button id="captureBtn" class="secondary">Capture &amp; classify frame</button>
+      <button id="autoBtn" class="secondary">Auto: on</button>
+    </div>
+    <canvas id="frameCanvas" width="16" height="12"></canvas>
+    <div class="bar-row"><span class="label">severity</span>
+      <div class="bar-track"><div class="bar-fill" id="sevBar" style="background:var(--accent);width:0%"></div></div>
+      <span class="val" id="sevVal">&mdash;</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Input: what it's reading</h2>
+    <textarea id="textInput">system running smoothly, all checks passed</textarea>
+    <div class="row">
+      <button id="classifyTextBtn">Classify this text</button>
+      <button id="nextMsgBtn" class="secondary">Try another message</button>
+    </div>
+    <div class="bar-row"><span class="label">calm</span>
+      <div class="bar-track"><div class="bar-fill" id="calmBar" style="background:var(--calm);width:0%"></div></div>
+      <span class="val" id="calmVal">&mdash;</span></div>
+    <div class="bar-row"><span class="label">neutral</span>
+      <div class="bar-track"><div class="bar-fill" id="neutralBar" style="background:var(--neutral);width:0%"></div></div>
+      <span class="val" id="neutralVal">&mdash;</span></div>
+    <div class="bar-row"><span class="label">urgent</span>
+      <div class="bar-track"><div class="bar-fill" id="urgentBar" style="background:var(--urgent);width:0%"></div></div>
+      <span class="val" id="urgentVal">&mdash;</span></div>
+    <div id="priorityLine">combined priority: <b id="priorityVal">&mdash;</b> &mdash; spawns an event when you capture a frame</div>
+  </div>
+
+  <div class="panel full">
+    <h2>Screen recognizer (OCR): what it's actually reading off your screen</h2>
+    <div id="ocrStatus" style="font-size:12.5px;color:var(--ink-dim);margin-bottom:6px;">not started</div>
+    <div id="ocrText" style="background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-height:40px;font-size:13px;white-space:pre-wrap;word-break:break-word;">&mdash; waiting for first screen read &mdash;</div>
+    <div class="bar-row" style="margin-top:8px;"><span class="label">calm</span>
+      <div class="bar-track"><div class="bar-fill" id="ocrCalmBar" style="background:var(--calm);width:0%"></div></div>
+      <span class="val" id="ocrCalmVal">&mdash;</span></div>
+    <div class="bar-row"><span class="label">neutral</span>
+      <div class="bar-track"><div class="bar-fill" id="ocrNeutralBar" style="background:var(--neutral);width:0%"></div></div>
+      <span class="val" id="ocrNeutralVal">&mdash;</span></div>
+    <div class="bar-row"><span class="label">urgent</span>
+      <div class="bar-track"><div class="bar-fill" id="ocrUrgentBar" style="background:var(--urgent);width:0%"></div></div>
+      <span class="val" id="ocrUrgentVal">&mdash;</span></div>
+    <div id="ocrNote" style="font-size:11.5px;color:var(--ink-dim);margin-top:8px;">
+      Flags urgent on-screen text straight into the response log below and boosts its priority so the swarm goes after it first.
+      Browsers can't dispatch real clicks outside this page for security reasons &mdash; this highlights and prioritizes, it does not click anything.
+    </div>
+  </div>
+
+  <div class="panel full">
+    <h2>Object recognition: what it visually sees on screen (real detector, not text)</h2>
+    <canvas id="objCanvas" width="960" height="720" style="width:100%;border-radius:6px;background:#000;display:block;"></canvas>
+    <div id="objStatus" style="font-size:12.5px;color:var(--ink-dim);margin-top:8px;">not started</div>
+    <div id="objNote" style="font-size:11.5px;color:var(--ink-dim);margin-top:6px;">
+      This is a general-purpose object detector (person, laptop, phone, book, etc. &mdash; the standard 80 COCO classes).
+      It doesn't know what a "warning icon" is, so it complements OCR rather than replacing it: OCR reads any text,
+      this reports what real-world objects are visible, and both feed the response log below.
+    </div>
+  </div>
+
+  <div class="panel full">
+    <h2>Response: agents self-organizing toward highest priority (local sensing only)</h2>
+    <canvas id="swarm" width="640" height="640"></canvas>
+    <div id="stats">
+      <div>events responded <span class="n" id="statCoverage">0 / 0</span></div>
+      <div>avg time &mdash; urgent <span class="n" id="statUrgent">&mdash;</span></div>
+      <div>avg time &mdash; neutral <span class="n" id="statNeutral">&mdash;</span></div>
+      <div>avg time &mdash; calm <span class="n" id="statCalm">&mdash;</span></div>
+    </div>
+  </div>
+
+  <div class="panel full">
+    <h2>Processing log</h2>
+    <div id="log"></div>
+  </div>
+
+</main>
+
+<script>
+// ---------- sample log messages (rotated by "Try another message") ----------
+const SAMPLE_TEXTS = [
+  "everything is fine, no action needed",
+  "system running smoothly, all checks passed",
+  "steady state maintained, nothing to report",
+  "processing request, please wait",
+  "moderate load detected on the network",
+  "new data received, awaiting classification",
+  "critical failure detected, immediate action required",
+  "warning: temperature exceeding safe threshold",
+  "emergency shutdown initiated, evacuate now",
+  "alert! unauthorized access attempt detected",
+  "all systems nominal, nothing to report",
+  "steady state maintained across the network",
+  "resting comfortably, low activity detected",
+  "quiet shift, everything running smoothly",
+  "routine check passed, no issues found",
+  "gentle hum from the servers, all stable",
+  "battery levels holding steady and comfortable",
+  "morning diagnostics passed without incident",
+  "temperature nominal, humidity stable",
+  "backup completed smoothly, all checks passed",
+  "night shift quiet, systems nominal",
+  "sensors reporting stable, calm conditions",
+  "everything is fine on the west wing",
+  "power draw steady, nothing unusual",
+  "traffic light and smooth this morning",
+  "maintenance completed, all systems nominal",
+  "quiet corridor, nothing to report",
+  "network latency low and stable",
+  "storage levels comfortable, no action needed",
+  "all clear, calm seas and steady winds",
+  "reactor readings nominal and stable",
+  "greenhouse climate steady, plants comfortable",
+  "warehouse quiet, inventory checks passed",
+  "steady heartbeat rhythm, patient comfortable",
+  "clear skies, flight path stable",
+  "gentle breeze on deck, calm waters",
+  "server load light, response times smooth",
+  "shift handover complete, all nominal",
+  "sensors calm, no anomalies detected",
+  "everything passed inspection, nothing to report",
+  "cooling system stable, temperatures comfortable",
+  "quiet lab, experiments proceeding smoothly",
+  "grid frequency steady and nominal",
+  "all quiet on the perimeter tonight",
+  "processing request, please stand by",
+  "update queued for review later today",
+  "moderate load observed on server three",
+  "new sensor data awaiting classification",
+  "task scheduled for standard processing",
+  "status check due later this afternoon",
+  "routine inspection scheduled for tomorrow",
+  "data sync in progress, please wait",
+  "firmware update available for review",
+  "log rotation scheduled for midnight",
+  "calibration check pending on unit four",
+  "shift report submitted for review",
+  "sensor batch queued for analysis",
+  "moderate traffic on the east corridor",
+  "pending approval on maintenance request",
+  "inventory count in progress",
+  "network throughput at average levels",
+  "review scheduled for the new sensor array",
+  "standard patrol underway, no findings yet",
+  "data backlog being processed as usual",
+  "routine software patch being applied",
+  "awaiting confirmation from control room",
+  "moderate humidity reading on sensor two",
+  "queue length at expected levels",
+  "training data batch being prepared",
+  "second shift beginning standard rounds",
+  "pending review of yesterday's logs",
+  "average load reported across the cluster",
+  "sensor recalibration in progress",
+  "waiting on scheduled diagnostics run",
+  "routine check-in from field unit seven",
+  "moderate signal noise, still within range",
+  "standard queue processing, no delays",
+  "critical failure detected, immediate action required",
+  "warning: pressure exceeding safe threshold",
+  "emergency shutdown initiated, evacuate now",
+  "alert! unauthorized access attempt detected",
+  "danger, collision imminent, brace for impact",
+  "critical alert, unauthorized entry detected",
+  "immediate response needed, system overload",
+  "warning: exceeding maximum load capacity",
+  "emergency, fire alarm triggered on floor two",
+  "critical failure in cooling system, act now",
+  "alert! intrusion detected in restricted zone",
+  "danger, gas leak detected, evacuate immediately",
+  "warning: battery critical, immediate charging required",
+  "emergency, medical assistance required immediately",
+  "critical, hull breach detected, brace for impact",
+  "alert! unauthorized override attempt in progress",
+  "immediate evacuation required, structural failure detected",
+  "warning: radiation levels exceeding safe threshold",
+  "critical failure, engine two immediate shutdown required",
+  "danger, unauthorized vehicle approaching, respond immediately",
+  "emergency, flood warning issued, evacuate low areas",
+  "alert! critical temperature exceeding safe threshold",
+  "warning, collision course detected, immediate correction needed",
+  "critical, power grid failure, immediate response required",
+  "danger, unauthorized drone detected, alert security immediately",
+  "emergency, chemical spill detected, evacuate the area now",
+  "critical failure on life support, immediate action required",
+  "alert! perimeter breach, unauthorized personnel detected",
+  "warning: severe storm approaching, brace for impact",
+  "immediate danger, bridge failure detected, evacuate now",
+  "critical, unauthorized signal jamming detected",
+  "emergency, brake failure warning, immediate stop required",
+  "alert! critical system failure, evacuate immediately"
+];
+let msgIdx = 0;
+
+// ---------- text classifier: transparent keyword scoring ----------
+const URGENT_WORDS = ["critical","failure","immediate","warning","exceeding","emergency","evacuate","alert","unauthorized","danger","collision","brace"];
+const CALM_WORDS = ["fine","smoothly","passed","steady","nothing to report","comfortably","stable","nominal","quiet","gentle"];
+
+function classifyText(text){
+  const t = text.toLowerCase();
+  let urgentScore = 0, calmScore = 0;
+  URGENT_WORDS.forEach(w => { if (t.includes(w)) urgentScore++; });
+  CALM_WORDS.forEach(w => { if (t.includes(w)) calmScore++; });
+  const raw = { urgent: urgentScore, calm: calmScore, neutral: 0.6 };
+  const sum = raw.urgent + raw.calm + raw.neutral;
+  const probs = { urgent: raw.urgent/sum, calm: raw.calm/sum, neutral: raw.neutral/sum };
+  const label = Object.keys(probs).reduce((a,b) => probs[a] > probs[b] ? a : b);
+  return { label, confidence: probs[label], probs };
+}
+
+// ---------- image "classifier": brightness + contrast -> severity 0-9 ----------
+const frameCanvas = document.getElementById('frameCanvas');
+const fctx = frameCanvas.getContext('2d', { willReadFrequently:true });
+
+function classifyFrame(sourceCanvasOrVideo){
+  fctx.drawImage(sourceCanvasOrVideo, 0, 0, frameCanvas.width, frameCanvas.height);
+  const data = fctx.getImageData(0, 0, frameCanvas.width, frameCanvas.height).data;
+  let sum = 0, n = data.length/4;
+  const vals = [];
+  for (let i=0; i<data.length; i+=4){
+    const gray = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+    vals.push(gray); sum += gray;
+  }
+  const mean = sum/n;
+  const variance = vals.reduce((a,v)=>a+(v-mean)**2,0)/n;
+  const contrast = Math.sqrt(variance) / 128; // ~0-1
+  const darkness = 1 - (mean/255);            // ~0-1, darker scenes = higher severity
+  const severityNorm = Math.max(0, Math.min(1, 0.5*darkness + 0.5*contrast));
+  const severityClass = Math.round(severityNorm * 9);
+  const confidence = Math.max(0.35, Math.min(0.95, Math.abs(severityNorm-0.5)*1.6 + 0.35));
+  return { severityClass, severityNorm, confidence };
+}
+
+// ---------- priority fusion (mirrors the python priority.py logic) ----------
+function computePriority(severityNorm, sevConf, urgencyLabel, urgConf){
+  const sevSignal = sevConf*severityNorm + (1-sevConf)*0.5;
+  const urgencyMap = { calm:0.1, neutral:0.5, urgent:1.0 };
+  const urgencyVal = urgencyMap[urgencyLabel] ?? 0.5;
+  const urgSignal = urgConf*urgencyVal + (1-urgConf)*0.5;
+  return 0.45*sevSignal + 0.55*urgSignal;
+}
+
+// ---------- desktop screen-share setup ----------
+const video = document.getElementById('video');
+const camStatus = document.getElementById('camStatus');
+const shareBtn = document.getElementById('shareBtn');
+let hasCam = false;
+
+shareBtn.onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 15 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    hasCam = true;
+    camStatus.textContent = 'live';
+    shareBtn.textContent = 'Sharing';
+    shareBtn.disabled = true;
+    stream.getVideoTracks()[0].addEventListener('ended', () => {
+      hasCam = false;
+      camStatus.textContent = 'stopped (using synthetic frames)';
+      shareBtn.textContent = 'Share screen'; shareBtn.disabled = false;
+    });
+    setAuto(true); // start processing automatically once permission is granted
+  } catch (e) {
+    camStatus.textContent = 'permission denied (using synthetic frames)';
+    setAuto(true); // still demonstrate the pipeline with synthetic frames
+  }
+};
+
+function grabSource(){
+  if (hasCam && video.videoWidth) return video;
+  // fallback: synthetic noisy frame so the demo still works without camera access
+  const c = document.createElement('canvas'); c.width=160; c.height=120;
+  const cx = c.getContext('2d');
+  cx.fillStyle = `hsl(${Math.random()*360},20%,${20+Math.random()*30}%)`;
+  cx.fillRect(0,0,160,120);
+  for (let i=0;i<40;i++){
+    cx.fillStyle = `rgba(255,255,255,${Math.random()*0.3})`;
+    cx.fillRect(Math.random()*160, Math.random()*120, Math.random()*20, Math.random()*20);
+  }
+  return c;
+}
+
+// ---------- UI wiring ----------
+const sevBar=document.getElementById('sevBar'), sevVal=document.getElementById('sevVal');
+const calmBar=document.getElementById('calmBar'), calmVal=document.getElementById('calmVal');
+const neutralBar=document.getElementById('neutralBar'), neutralVal=document.getElementById('neutralVal');
+const urgentBar=document.getElementById('urgentBar'), urgentVal=document.getElementById('urgentVal');
+const priorityVal=document.getElementById('priorityVal');
+const textInput=document.getElementById('textInput');
+const logEl=document.getElementById('log');
+
+let lastText = classifyText(textInput.value);
+let lastFrame = null;
+
+function renderTextBars(res){
+  calmBar.style.width=(res.probs.calm*100).toFixed(0)+'%'; calmVal.textContent=(res.probs.calm*100).toFixed(0)+'%';
+  neutralBar.style.width=(res.probs.neutral*100).toFixed(0)+'%'; neutralVal.textContent=(res.probs.neutral*100).toFixed(0)+'%';
+  urgentBar.style.width=(res.probs.urgent*100).toFixed(0)+'%'; urgentVal.textContent=(res.probs.urgent*100).toFixed(0)+'%';
+}
+function renderSevBar(res){
+  sevBar.style.width=(res.severityNorm*100).toFixed(0)+'%';
+  sevVal.textContent='class '+res.severityClass;
+}
+renderTextBars(lastText);
+
+document.getElementById('classifyTextBtn').onclick = () => {
+  lastText = classifyText(textInput.value);
+  renderTextBars(lastText);
+  updatePriorityLine();
+};
+document.getElementById('nextMsgBtn').onclick = () => {
+  msgIdx = (msgIdx+1) % SAMPLE_TEXTS.length;
+  textInput.value = SAMPLE_TEXTS[msgIdx];
+  lastText = classifyText(textInput.value);
+  renderTextBars(lastText);
+  updatePriorityLine();
+};
+function updatePriorityLine(){
+  if (!lastFrame) { priorityVal.textContent = '— capture a frame —'; return; }
+  const p = computePriority(lastFrame.severityNorm, lastFrame.confidence, lastText.label, lastText.confidence);
+  priorityVal.textContent = p.toFixed(3);
+  return p;
+}
+
+document.getElementById('captureBtn').onclick = () => processCycle();
+let autoOn = false, autoTimer = null;
+const autoBtn = document.getElementById('autoBtn');
+function setAuto(on){
+  autoOn = on;
+  autoBtn.textContent = 'Auto: ' + (autoOn ? 'on' : 'off');
+  clearInterval(autoTimer);
+  if (autoOn){ autoTimer = setInterval(processCycle, 3500); }
+}
+autoBtn.onclick = () => setAuto(!autoOn);
+// recogniser runs continuously from page load, feeding the control-response items below;
+// switches seamlessly to real screen frames once "Share screen" is granted
+setAuto(true);
+
+// ---------- screen OCR: actually reads text off the shared screen/frame (Tesseract.js, runs in-browser) ----------
+const ocrStatusEl = document.getElementById('ocrStatus');
+const ocrTextEl = document.getElementById('ocrText');
+const ocrBars = {
+  calm: [document.getElementById('ocrCalmBar'), document.getElementById('ocrCalmVal')],
+  neutral: [document.getElementById('ocrNeutralBar'), document.getElementById('ocrNeutralVal')],
+  urgent: [document.getElementById('ocrUrgentBar'), document.getElementById('ocrUrgentVal')],
+};
+const ocrCanvas = document.createElement('canvas');
+const octx = ocrCanvas.getContext('2d', { willReadFrequently:true });
+let ocrWorker = null, ocrBusy = false;
+
+async function getOcrWorker(){
+  if (!ocrWorker){
+    ocrStatusEl.textContent = 'loading OCR engine…';
+    ocrWorker = await Tesseract.createWorker('eng');
+    // sparse-text mode: screens are usually scattered UI labels/buttons, not one paragraph
+    await ocrWorker.setParameters({ tessedit_pageseg_mode: '11' });
+  }
+  return ocrWorker;
+}
+
+function renderOcrBars(probs){
+  ['calm','neutral','urgent'].forEach(k => {
+    const [bar,val] = ocrBars[k];
+    const pct = (probs[k]*100).toFixed(0);
+    bar.style.width = pct+'%'; val.textContent = pct+'%';
+  });
+}
+
+// preprocess for OCR: grayscale + contrast stretch + binarize - real text reads far more
+// reliably off a thresholded image than off a raw color screenshot
+function preprocessForOcr(canvas, ctx){
+  const { width, height } = canvas;
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const d = imgData.data;
+  let min = 255, max = 0;
+  const gray = new Uint8ClampedArray(width * height);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    gray[p] = g; if (g < min) min = g; if (g > max) max = g;
+  }
+  const range = Math.max(1, max - min);
+  const threshold = min + range * 0.55;
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const stretched = ((gray[p] - min) / range) * 255;
+    const v = stretched > (threshold - min) / range * 255 ? 255 : 0;
+    d[i] = d[i+1] = d[i+2] = v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// keep only words Tesseract is actually confident about - single stray letters at low
+// confidence are noise, not "text on screen", and shouldn't be fed into the classifier
+function cleanOcrText(data){
+  const words = (data.words || []).filter(w => w.confidence >= 55 && w.text.trim().length >= 2);
+  return words.map(w => w.text).join(' ').trim();
+}
+
+async function runOcrCycle(){
+  if (ocrBusy) return;
+  ocrBusy = true;
+  try {
+    const src = grabSource();
+    ocrCanvas.width = 1280; ocrCanvas.height = 960;
+    octx.drawImage(src, 0, 0, ocrCanvas.width, ocrCanvas.height);
+    preprocessForOcr(ocrCanvas, octx);
+    const worker = await getOcrWorker();
+    ocrStatusEl.textContent = 'reading screen…';
+    const { data } = await worker.recognize(ocrCanvas);
+    const text = cleanOcrText(data);
+    const now = new Date().toLocaleTimeString();
+    if (!text || text.length < 4){
+      ocrTextEl.textContent = '— no confident text found on screen right now —';
+      renderOcrBars({ calm: 0.34, neutral: 0.33, urgent: 0.33 });
+      ocrStatusEl.textContent = 'last read at ' + now + ' — nothing confident, see object panel';
+      return;
+    }
+    ocrTextEl.textContent = text;
+    const cls = classifyText(text);
+    renderOcrBars(cls.probs);
+    if (cls.label === 'urgent' && cls.confidence > 0.4){
+      ocrStatusEl.textContent = '⚠ urgent text found on screen at ' + now;
+      flagUrgentOnScreen(text, cls, lastObjects.map(p => p.class).join(', '));
+    } else {
+      ocrStatusEl.textContent = 'last read at ' + now + ' — ' + cls.label;
+    }
+  } catch (e) {
+    ocrStatusEl.textContent = 'OCR error: ' + e.message;
+  } finally {
+    ocrBusy = false;
+  }
+}
+
+function flagUrgentOnScreen(text, cls, extra){
+  // this is the closest a browser tab can safely get to "acting on" urgent screen content:
+  // it cannot dispatch real OS-level clicks outside this page, so instead it raises priority,
+  // logs it, and lets the swarm converge on it first - see the note under the OCR panel.
+  const priority = Math.max(computePriority(0.7, 0.6, cls.label, cls.confidence), 0.75);
+  const label = (extra ? '[screen+objects] ' : '[screen] ') + text.slice(0, 100) + (extra ? (' | sees: ' + extra) : '');
+  spawnEvent(priority, 'urgent', label, frameCanvas.toDataURL());
+}
+
+// ---------- object recognition: real detector (TensorFlow.js coco-ssd), complements OCR ----------
+const objCanvas = document.getElementById('objCanvas');
+const octx2 = objCanvas.getContext('2d');
+const objStatusEl = document.getElementById('objStatus');
+let cocoModel = null, objBusy = false, lastObjects = [];
+
+async function getCocoModel(){
+  if (!cocoModel){
+    objStatusEl.textContent = 'loading object model…';
+    cocoModel = await cocoSsd.load();
+  }
+  return cocoModel;
+}
+
+async function runObjectCycle(){
+  if (objBusy) return;
+  objBusy = true;
+  try {
+    const src = grabSource();
+    objCanvas.width = 960; objCanvas.height = 720;
+    octx2.drawImage(src, 0, 0, objCanvas.width, objCanvas.height);
+    const model = await getCocoModel();
+    objStatusEl.textContent = 'looking…';
+    const predictions = await model.detect(objCanvas);
+    lastObjects = predictions.filter(p => p.score >= 0.5);
+    // redraw frame then overlay boxes
+    octx2.drawImage(src, 0, 0, objCanvas.width, objCanvas.height);
+    octx2.lineWidth = 2; octx2.strokeStyle = '#3ddc97'; octx2.font = '13px sans-serif'; octx2.fillStyle = '#3ddc97';
+    lastObjects.forEach(p => {
+      const [x, y, w, h] = p.bbox;
+      octx2.strokeRect(x, y, w, h);
+      octx2.fillText(`${p.class} ${(p.score*100).toFixed(0)}%`, x + 2, Math.max(12, y - 4));
+    });
+    const now = new Date().toLocaleTimeString();
+    objStatusEl.textContent = lastObjects.length
+      ? `last look at ${now} — sees: ` + lastObjects.map(p => p.class).join(', ')
+      : `last look at ${now} — nothing recognizable in view`;
+  } catch (e) {
+    objStatusEl.textContent = 'object detection error: ' + e.message;
+  } finally {
+    objBusy = false;
+  }
+}
+
+// heavier than OCR - runs on its own slow loop, and its findings ride along on the next
+// OCR-driven log entry (see runOcrCycle/flagUrgentOnScreen "sees:" suffix) so both signals
+// land in the same control-response items instead of two disconnected panels
+setInterval(runObjectCycle, 5000);
+runObjectCycle();
+
+// OCR is heavier than the frame/text demo cycle, so it runs on its own slower loop
+setInterval(runOcrCycle, 4000);
+runOcrCycle();
+
+function processCycle(){
+  lastFrame = classifyFrame(grabSource());
+  renderSevBar(lastFrame);
+  lastText = classifyText(textInput.value);
+  renderTextBars(lastText);
+  const priority = updatePriorityLine();
+  spawnEvent(priority, lastText.label, textInput.value, frameCanvas.toDataURL());
+  if (autoOn){
+    msgIdx = (msgIdx+1) % SAMPLE_TEXTS.length;
+    textInput.value = SAMPLE_TEXTS[msgIdx];
+  }
+}
+
+function logRow(thumb, text, label, priority){
+  const row = document.createElement('div'); row.className='logrow';
+  row.innerHTML = `<img src="${thumb}"><span class="txt">${text}</span>` +
+    `<span class="tag ${label}">${label}</span>` +
+    `<span style="font-family:ui-monospace,Menlo,monospace;color:var(--ink-dim)">${priority.toFixed(2)}</span>`;
+  logEl.prepend(row);
+  while (logEl.children.length > 125) logEl.removeChild(logEl.lastChild);
+}
+
+// ---------- swarm allocation (2D, local-sensing agents) ----------
+const swarmCanvas = document.getElementById('swarm');
+const sctx = swarmCanvas.getContext('2d');
+const W = swarmCanvas.width, H = swarmCanvas.height;
+const N_AGENTS = 5, SENSOR_R = 260, CAPTURE_R = 16, SPEED = 90; // px/sec
+
+let agents = Array.from({length:N_AGENTS}, () => ({
+  x: Math.random()*W, y: Math.random()*H, trail: [], target: null
+}));
+let events = []; // {x,y,priority,label,text,thumb,responded,spawnTime,responseTime}
+let eventId = 0;
+let simClock = 0;
+
+function spawnEvent(priority, label, text, thumb){
+  const ev = { id: eventId++, x: 40+Math.random()*(W-80), y: 40+Math.random()*(H-80),
+               priority, label, text, thumb, responded:false, spawnTime: simClock, responseTime:null };
+  events.push(ev);
+  logRow(thumb, text, label, priority);
+  updateStats();
+}
+
+function chooseTargets(){
+  const proposals = {};
+  agents.forEach((a,i) => {
+    let best=null, bestScore=-1, bestD=null;
+    events.forEach(ev => {
+      if (ev.responded) return;
+      const d = Math.hypot(ev.x-a.x, ev.y-a.y);
+      if (d > SENSOR_R) return;
+      const score = (ev.priority**2) / Math.sqrt(d+1);
+      if (score > bestScore){ best=ev; bestScore=score; bestD=d; }
+    });
+    a.target = best;
+    if (best){ (proposals[best.id] ||= []).push({i, d:bestD}); }
+  });
+  Object.values(proposals).forEach(list => {
+    if (list.length > 1){
+      list.sort((a,b)=>a.d-b.d);
+      list.slice(1).forEach(c => { agents[c.i].target = null; });
+    }
+  });
+}
+
+let lastT = performance.now();
+function tick(now){
+  const dt = Math.min(0.05, (now-lastT)/1000); lastT = now; simClock += dt;
+  chooseTargets();
+  agents.forEach(a => {
+    let dx, dy;
+    if (a.target){ dx = a.target.x-a.x; dy = a.target.y-a.y; }
+    else { dx = Math.cos(now/1000+a.x)*0.3; dy = Math.sin(now/1000+a.y)*0.3; }
+    const len = Math.hypot(dx,dy)+1e-6;
+    a.x += (dx/len)*SPEED*dt; a.y += (dy/len)*SPEED*dt;
+    a.x = Math.max(0,Math.min(W,a.x)); a.y = Math.max(0,Math.min(H,a.y));
+    a.trail.push({x:a.x,y:a.y}); if (a.trail.length>40) a.trail.shift();
+    if (a.target && Math.hypot(a.target.x-a.x, a.target.y-a.y) < CAPTURE_R && !a.target.responded){
+      a.target.responded = true; a.target.responseTime = simClock - a.target.spawnTime;
+      updateStats();
+    }
+  });
+  draw();
+  requestAnimationFrame(tick);
+}
+
+function priorityColor(p){
+  const hue = (1-p)*200; // blue (low) -> red (high)
+  return `hsl(${hue}, 80%, 55%)`;
+}
+
+function draw(){
+  sctx.clearRect(0,0,W,H);
+  sctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  for (let x=0;x<W;x+=40){ sctx.beginPath(); sctx.moveTo(x,0); sctx.lineTo(x,H); sctx.stroke(); }
+  for (let y=0;y<H;y+=40){ sctx.beginPath(); sctx.moveTo(0,y); sctx.lineTo(W,y); sctx.stroke(); }
+
+  events.forEach(ev => {
+    sctx.beginPath();
+    sctx.arc(ev.x, ev.y, 8+ev.priority*10, 0, 7);
+    sctx.fillStyle = priorityColor(ev.priority);
+    sctx.globalAlpha = ev.responded ? 0.28 : 0.95;
+    sctx.fill();
+    if (ev.responded){
+      sctx.globalAlpha = 1; sctx.strokeStyle = '#3ddc97'; sctx.lineWidth = 2; sctx.stroke();
+    }
+    sctx.globalAlpha = 1;
+  });
+
+  agents.forEach(a => {
+    sctx.beginPath();
+    a.trail.forEach((p,i) => i===0 ? sctx.moveTo(p.x,p.y) : sctx.lineTo(p.x,p.y));
+    sctx.strokeStyle = 'rgba(255,157,61,0.35)'; sctx.lineWidth=2; sctx.stroke();
+    sctx.beginPath(); sctx.arc(a.x, a.y, 7, 0, 7);
+    sctx.fillStyle = '#ff9d3d'; sctx.fill();
+  });
+}
+requestAnimationFrame(tick);
+
+function fmt(t){ return t==null ? '—' : t.toFixed(1)+'s'; }
+function updateStats(){
+  const total = events.length, done = events.filter(e=>e.responded).length;
+  document.getElementById('statCoverage').textContent = `${done} / ${total}`;
+  ['urgent','neutral','calm'].forEach(label => {
+    const times = events.filter(e=>e.label===label && e.responded).map(e=>e.responseTime);
+    const avg = times.length ? times.reduce((a,b)=>a+b,0)/times.length : null;
+    document.getElementById('stat'+label[0].toUpperCase()+label.slice(1)).textContent = fmt(avg);
+  });
+}
+</script>
+</body>
+</html>
